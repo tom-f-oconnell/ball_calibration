@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 import pickle
 
 use_sensor = True
+__check__ = False
 
 class OpticFlowSensor(serial.Serial):
 
@@ -55,13 +56,15 @@ class OpticFlowSensor(serial.Serial):
             except:
                 pass
             
-            # TODO remove. for debugging.
-            if len(integerized) != 4:
+            if __check__ and len(integerized) != 4:
                 print('bad line: ' + rawData)
 
         return dataList
 
 def test_velocity(stepper, sensor, velocity):
+    '''
+    expecting velocity in revolutions per second.
+    '''
 
     microsteps_per_rev = 3200
     rotation_time = 5 # sec (per increment)
@@ -70,20 +73,21 @@ def test_velocity(stepper, sensor, velocity):
     steady_time = rotation_time - \
         (acceleration_period + deceleration_period)
 
-    print 'velocity=' + str(revs_per_sec) + ' revs/sec', 
+    print 'velocity=' + str(velocity) + ' revs/sec', 
     if velocity >= 0:
         print 'forward'
     else:
         print 'backward'
 
     # set a speed
-    steps_per_sec = revs_per_sec * microsteps_per_rev
+    steps_per_sec = velocity * microsteps_per_rev
     desiredNumMicrosteps = steps_per_sec * rotation_time
 
-    stepper.setVelocityLimit(stepper_id, steps_per_sec)
+    # selects only the positive component (magnitude)
+    stepper.setVelocityLimit(stepper_id, \
+        np.sign(steps_per_sec) * steps_per_sec)
     
-    stepper.setTargetPosition(stepper_id, \
-        int(np.sign(velocity)) * int(desiredNumMicrosteps))
+    stepper.setTargetPosition(stepper_id, int(desiredNumMicrosteps))
     
     # wait for it to get up to speed
     sleep(acceleration_period)
@@ -105,15 +109,18 @@ def test_velocity(stepper, sensor, velocity):
             new = sensor.readData()
             sensor_data.append(new)
 
-            for n in new:
-                if len(n) < min_so_far:
-                    min_so_far = len(n)
+            if __check__:
+                for n in new:
+                    if len(n) < min_so_far:
+                        min_so_far = len(n)
 
-    print("smallest number of datapoints from any one read" + \
-        str(min_so_far))
+    if __check__:
+        print("smallest number of datapoints from any one read " + \
+            str(min_so_far))
 
     # TODO working? other code didn't seem to use this
-    # SENSOR SEEMS TO REPORT A SATURATED VALUE AFTER STOP?
+    # SENSOR SEEMS TO REPORT A SATURATED VALUE RANDOMLY
+    # previously seemed as though it might just be after being stopped
     # (not doing this) will just use empty reads in between trials
     #if use_sensor:
     #    sensor.stop()
@@ -191,7 +198,7 @@ try:
     stepper.setOnPositionChangeHandler(StepperPositionChanged)
     stepper.setOnVelocityChangeHandler(StepperVelocityChanged)
 except PhidgetException as e:
-    print("Phidget Exception %i: %s" % (e.code, e.details))
+    print("Phidget Exception (in setup) %i: %s" % (e.code, e.details))
     print("Exiting....")
     exit(1)
 
@@ -200,7 +207,7 @@ print("Opening phidget object....")
 try:
     stepper.openPhidget()
 except PhidgetException as e:
-    print("Phidget Exception %i: %s" % (e.code, e.details))
+    print("Phidget Exception (in opening) %i: %s" % (e.code, e.details))
     print("Exiting....")
     exit(1)
 
@@ -209,13 +216,17 @@ print("Waiting for attach....")
 try:
     stepper.waitForAttach(10000)
 except PhidgetException as e:
-    print("Phidget Exception %i: %s" % (e.code, e.details))
+    print("Phidget Exception (in attaching) %i: %s" % \
+        (e.code, e.details))
+    # could probably remove this block
     try:
         stepper.closePhidget()
     except PhidgetException as e:
-        print("Phidget Exception %i: %s" % (e.code, e.details))
+        print("Phidget Exception (in closing) %i: %s" % \
+        (e.code, e.details))
         print("Exiting....")
         exit(1)
+
     print("Exiting....")
     exit(1)
 else:
@@ -223,6 +234,9 @@ else:
 
 try:
     should_plot = True
+
+    if should_plot:
+        plt.close('all')
 
     if use_sensor:
         port = '/dev/ttyACM1'
@@ -268,8 +282,6 @@ try:
         
         data.append(test_velocity(stepper, sensor, revs_per_sec))
 
-    # TODO save/print coeffs
-
     if use_sensor:
         # data = [x for x in data if not np.isclose(x[0], 0.0)]
         rotation_speeds = [x[0] for x in data]
@@ -295,7 +307,6 @@ try:
 
             # each preset velocity stepper runs at
             for v in range(len(data)):
-                #print('entering outer loop')
                 # group non-empty lists within one velocity
                 trial_data = [x for x in data[v][1] if len(x) > 0]
 
@@ -304,41 +315,33 @@ try:
                 joined = [j for i in trial_data for j in i]
 
                 # select out one dimension for the current regression
-                # TODO occasionally getting index out of range errors
-                # how is that possible?
-                '''
-                min_x_len = min([len(x) for x in joined])
-                print('min_x_len:' + str(min_x_len))
-                for i in range(len(joined)):
-                    if len(x) == min_x_len:
-                        print('in inner loop ' + str(x))
-                print('after loop')
-                '''
-
-                #new_dim_data = [x[d] for x in joined]
                 new_dim_data = []
                 for x in joined:
                     if len(x) > d:
                         new_dim_data.append(x[d])
-                    else:
+                    # sometimes there are malformed lines
+                    elif __check__:
                         print(str(x) + " wasn't long enough")
 
                 # add a number of repeats of the current velocity
                 # equal to the number of data points we got here
-                # TODO test number of data points is consistent across
-                # trials
                 velocities = velocities + [[data[v][0]] for x in new_dim_data]
-                #dim_data.append(new_dim_data)
+
+                # test number of data points is consistent across
+                # trials
+                if __check__:
+                    print(len(dim_data))
+
                 dim_data = dim_data + new_dim_data
 
             # save the nicely formatted data for use manual inspection later
-            all_dim_data.append(dim_data)
+            #all_dim_data.append(dim_data)
             
-            # TODO make subplots
             plt.subplot(2,2,d+1)
             plt.plot(dim_data)
             plt.title('Sensor dimension ' + str(d))
-            # TODO WHAT DETERMINES RATE
+            # TODO WHAT DETERMINES RATE (it is hardcoded in arduino.
+            # not sure if it is checked sufficiently though)
             plt.ylabel('Sensor output along dimension '+str(d))
             plt.xlabel('Datapoints from sensor')
             plt.show()
@@ -346,27 +349,30 @@ try:
             # calculate the coefficient relating the ball velocity, 
             # in revolutions per second, to output along the current
             # sensor dimension
-            print(np.linalg.lstsq(velocities, \
-                dim_data))
             X, residuals, rank, singular_values = \
                 np.linalg.lstsq(velocities, dim_data)
+            # TODO might try RANSAC, or something else less
+            # sensitive to outliers than least squares
+            # TODO always outputting same singular value?
+            # artifact of the numpy algorithm for values near 0?
 
             # the coefficient relating this sensor dimension
             # to ball velocity in revolutions per second
-            # assumes X is a scalar
-            print(X.shape)
+            # (assumes X is a scalar)
+            # TODO handle division by zero
+            # maybe just run lstqs in the other direction?
             coefficients.append(1 / X)
+            print('coefficient: ' + str(1 / X))
+            print('residual: ' + str(residuals))
 
             # TODO test and report on linearity (r^2?)
 
-            # TODO assert some sensor values are around zero (yaw ones)
+            # TODO assert appropriate sensor values are around zero
 
-            print(x)
-            print(residuals)
         
         side = raw_input('Where is the calibration stepper, from ' + \
-            'your perspective? [L/l]eft, [R/r]ight, or [T/t]op.\n' + \
-            'Calibration will not be saved with any other key.\n')
+            'your perspective? [l]eft, [r]ight, [t]op, or' + \
+            ' do [n]ot save.\n')
 
         if side.lower() == 'l':
             # should cause one dimension of ipsilateral sensor
@@ -385,10 +391,107 @@ try:
                 pickle.dump(coefficients, f)
 
         else:
-            print('Invalid side. Not saving calibration data.')
-    
+            print('Not saving calibration data.')
+
+        guess = raw_input('Try to guess random rotational ' + \
+            'velocities? [y]es / [n]o.\n')
+
+        # TODO add ability to just test existing calibration
+
+        # should be able to align on different axes before answering
+        # the above question, to test a wider array of cases
+
+        # can also switch test balls before starting tests
+        # (to check for texture dependence)
+        if guess.lower() == 'y':
+            guesses = 5
+            # same as above
+            # corresponds to about 50 cm / sec
+            max_revs_per_sec = 16.0
+
+            # from Dylan Chen's answer here:
+            # http://stackoverflow.com/questions/6963035/
+            # ...pyplot-axes-labels-for-subplots
+            fig, ax = plt.subplots(guesses, 4, sharex=True, sharey=True)
+            # may not be necessary?
+            fig.add_subplot(111, frameon=False)
+            plt.tick_params(labelcolor='none', top='off', bottom='off',\
+                left='off', right='off')
+            # TODO change to dimension / test velocity
+            # TODO not working. fix.
+            plt.xlabel('Time in 3 second test period')
+            plt.ylabel('True velocity (v) - velocity estimated from '+\
+                'sensor dimension (d). Units are revs per sec.')
+            plt.suptitle('Error in velocity estimated independently ' +\
+                'with each dimension')
+
+            count = 0
+
+            rand_velocities = np.random.uniform(low=-max_revs_per_sec, \
+                high=max_revs_per_sec, size=guesses)
+
+            print('Will try: ' + str(rand_velocities))
+
+            for v in rand_velocities:
+
+                _, data = test_velocity(stepper, sensor, v)
+
+                '''
+                because the bottom of the ball is occluded
+                sensors that would otherwise be seeing a net zero
+                optic flow will output some nonzero optic flow
+                TODO how to calculate velocities such that they
+                generalize as best as possible? (to rotation along
+                non principal axes)
+                '''
+
+                # TODO break this section out in to a function?
+                # (it is used above too) just tricky because 
+                # it is tightly coupled to velocity enumeration
+
+                # group non-empty lists within one velocity
+                trial_data = [x for x in data if len(x) > 0]
+
+                # join all top-level lists within one period
+                # of data collection (one rotational velocity)
+                joined = [j for i in trial_data for j in i]
+
+                # make one plot for each sensor dimension
+                for d in range(4):
+                    dim_data = []
+
+                    for x in joined:
+                        if len(x) > d:
+                            dim_data.append(x[d])
+
+                        # sometimes there are malformed lines
+                        elif __check__:
+                            print(str(x) + " wasn't long enough")
+
+                    dim_data = np.array(dim_data)
+
+                    # could try smoothing before scaling
+
+                    plt.subplot(guesses, 4, 4*count + d + 1)
+                    # plotting the error
+                    plt.plot(np.arange(dim_data.size), \
+                        v - coefficients[d] * dim_data)
+
+                    plt.title('v=' + str(v)[:4] + ', d=' + str(d))
+                    # put in a fig note saying d is dimension used to
+                    # estimate v
+
+                    # TODO make all the same and keep for one?
+                    frame = plt.gca()
+                    frame.axes.get_xaxis().set_ticks([])
+                    #frame.axes.get_yaxis().set_ticks([])
+
+                count = count + 1
+                
+            plt.show()
+
 except PhidgetException as e:
-    print("Phidget Exception %i: %s" % (e.code, e.details))
+    print("Phidget Exception (in main) %i: %s" % (e.code, e.details))
 
 # close serial stuff no matter how we exit
 # with(...) syntax probably the best, but more involved
