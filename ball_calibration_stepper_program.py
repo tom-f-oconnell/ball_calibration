@@ -5,10 +5,12 @@ This work is licensed under the Creative Commons Attribution 2.5 Canada License.
 To view a copy of this license, visit http://creativecommons.org/licenses/by/2.5/ca/
 """
 
-#Basic imports
+from __future__ import print_function
+
 from ctypes import *
 import sys
 from time import sleep
+
 #Phidget specific imports
 from Phidgets.PhidgetException import PhidgetErrorCodes, PhidgetException
 from Phidgets.Events.Events import AttachEventArgs, DetachEventArgs, ErrorEventArgs, InputChangeEventArgs, CurrentChangeEventArgs, StepperPositionChangeEventArgs, VelocityChangeEventArgs
@@ -25,13 +27,17 @@ import seaborn as sns
 import pickle
 
 # global flags
-use_sensor = True
 should_plot = True
 automatically_test = True
 # for more verbose troubleshooting information
-__check__ = False
+__check__ = True
 # TODO remove
-fixed_side = 'r'
+fixed_mode = '3'
+fixed_side = 'l'
+'''
+fixed_mode = None
+fixed_side = None
+'''
 
 class OpticFlowSensor(serial.Serial):
 
@@ -85,6 +91,22 @@ class OpticFlowSensor(serial.Serial):
 
         return dataList
 
+def get_side():
+    """ Returns a char that indicates where the stepper is. """
+    
+    # fixed_side is a global flag (above)
+    if fixed_side == None:
+        side = raw_input('Where is the calibration stepper, from ' + \
+            'your perspective? [l]eft, [r]ight, [t]op\n').lower()
+    else:
+        side = fixed_side
+
+    if not (side == 'l' or side == 'r' or side == 't'):
+        print('Invalid side.')
+        sys.exit()
+
+    return side
+    
 def load_calibration():
     yaw_dims, yaw_coeffs = pickle.load(open('yaw_calibration.p','r'))
     left_y_dim, left_coeff = pickle.load(open('left_calibration.p','r'))
@@ -104,7 +126,7 @@ def test_velocity(stepper, sensor, velocity):
     '''
     expecting velocity in revolutions per second.
     '''
-
+    
     stepper_id = 0
     microsteps_per_rev = 3200
     rotation_time = 5 # sec (per increment)
@@ -116,12 +138,13 @@ def test_velocity(stepper, sensor, velocity):
     # i think this could be avoided if you just figure out
     # how to make acceleration of Phidget non-limiting
     discard_fraction = 0.5
-
-    print 'velocity=' + str(velocity) + ' revs/sec', 
+    
+    print('velocity=' + str(velocity) + ' revs/sec', end="")
+    
     if velocity >= 0:
-        print 'forward'
+        print('forward')
     else:
-        print 'backward'
+        print('backward')
 
     # set a speed
     steps_per_sec = velocity * microsteps_per_rev
@@ -130,7 +153,8 @@ def test_velocity(stepper, sensor, velocity):
     # selects only the positive component (magnitude)
     stepper.setVelocityLimit(stepper_id, \
         np.sign(steps_per_sec) * steps_per_sec)
-    
+
+    stepper.setCurrentPosition(stepper_id, 0)
     stepper.setTargetPosition(stepper_id, int(desiredNumMicrosteps))
     
     # wait for it to get up to speed
@@ -138,8 +162,7 @@ def test_velocity(stepper, sensor, velocity):
 
     # TODO mind (non-small) synchronization errors
     # acquire optic flow data
-    if use_sensor:
-        sensor.start()
+    sensor.start()
 
     end = time.time() + steady_time
 
@@ -153,24 +176,18 @@ def test_velocity(stepper, sensor, velocity):
         bad_lines = 0
 
     while time.time() < end:
-        # something neater?
-        if use_sensor:
-            new = sensor.readData()
+        new = sensor.readData()
 
-            sensor_data += [x for x in new if len(x) == 4]
+        sensor_data += [x for x in new if len(x) == 4]
 
-            if __check__:
-                for n in new:
-                    if len(n) < min_so_far:
-                        min_so_far = len(n)
-                    if len(n) > max_so_far:
-                        max_so_far = len(n)
-                    if len(n) != 4:
-                        bad_lines += 1
-
-    if __check__:
-        print('bad lines in readData: ' + str(bad_lines))
-        assert bad_lines < (len(sensor_data) / 2.0), 'bad data'
+        if __check__:
+            for n in new:
+                if len(n) < min_so_far:
+                    min_so_far = len(n)
+                if len(n) > max_so_far:
+                    max_so_far = len(n)
+                if len(n) != 4:
+                    bad_lines += 1
 
     if __check__:
         print("smallest number of datapoints from any one read " + \
@@ -178,13 +195,11 @@ def test_velocity(stepper, sensor, velocity):
         print("largest number of datapoints from any one read " + \
             str(max_so_far))
 
-    # TODO seemed like this might not stop accumulation?
-    #if use_sensor:
-    #    sensor.stop()
+        print('bad lines in readData: ' + str(bad_lines))
+        assert bad_lines < (len(sensor_data) / 2.0), 'bad data'
 
-    # I want the sensor to think it is at this position again
-    # documentation unclear on effects
-    stepper.setCurrentPosition(stepper_id, 0)
+    # TODO seemed like this might not stop accumulation?
+    # sensor.stop()
 
     sleep(deceleration_period)
 
@@ -434,10 +449,14 @@ else:
     DisplayDeviceInfo()
 
 try:
-    mode = raw_input('Select mode:\n[1] - [g]enerate calibration\n' +
-                     '[2] - [t]est existing calibration\n' + \
-                     '[3] - drive [s]lowly for aligning sensors\n' + 
-                     '[4] - [q]uit\n')
+    if fixed_mode == None:
+        mode = raw_input('Select mode:\n[1] - [g]enerate calibration\n' +
+                         '[2] - [t]est existing calibration\n' + \
+                         '[3] - manually minimize flow to [a]lign\n' +
+                         '[4] - drive [s]lowly for visually aligning\n' + 
+                         '[5] - [q]uit\n')
+    else:
+        mode = fixed_mode
 
     c = mode.lower()
     
@@ -452,12 +471,112 @@ try:
 
     microsteps_per_rev = 3200
 
-    """
-    To check whether the ball is in axis. Use in combination with
-    Arduino script `vis_optic_flow.ino' and Python script
-    `ADNS3080ImageGrabber.py
-    """
-    if c == '3' or c == 's':
+    if c == '3' or c == 'a':
+        # should have read_optic_flow.ino uploaded to the Arduino for
+        # this function
+
+        # get where the stepper is from the user
+        side = get_side()
+
+        print(side)
+
+        if side == 'l':
+            dims_to_zero = [1, 0, 2] # 1 may be most important?
+        elif side == 't':
+            dims_to_zero = [1, 3]
+        elif side == 'r':
+            dims_to_zero = [3, 0, 2] # 3 may be most important?
+
+        port = '/dev/ttyACM1'
+        sensor = OpticFlowSensor(port)
+
+        cycle = 120
+        velocity = 10.0 # revs / sec
+
+        steps_per_sec = velocity * microsteps_per_rev
+        desiredNumMicrosteps = int(round(steps_per_sec * cycle))
+
+        print('Press Ctrl-C to exit')
+
+        read_cycle = 0.1
+        # might want to make this dependent on acquisition rate
+        # determines how long of a time interval used for mean
+        buffer_size = 1000
+        buff = np.empty((buffer_size, 4))
+        integral = np.zeros((4,))
+        margin = 1.0 # percent
+        sensor.start()
+
+        linewidth = 76
+
+        while True:
+            stepper.setCurrentPosition(stepper_id , 0)
+            stepper.setVelocityLimit(stepper_id, int(steps_per_sec))
+            #time.sleep(0.1)
+            stepper.setTargetPosition(stepper_id, desiredNumMicrosteps)
+            stepper.setEngaged(stepper_id, True)
+
+            start = time.time()
+
+            # TODO tell people which moves to make to align it
+            while time.time() < time.time() + cycle:
+                # TODO maybe just have the sensor object clean the data
+                # and report on it?
+                new = sensor.readData()
+                data = np.array([x for x in new if len(x) == 4])
+                # off by one? look at shape TODO
+                diff = buffer_size - data.shape[0]
+                buff[:diff,:] = buff[-diff:,:]
+                buff[diff:,:] = data
+
+                '''
+                low = np.percentile(data, margin, axis=0)
+                high = np.percentile(data, 100.0 - margin, axis=0)
+
+                out1 = 'low:'
+                #for d in dims_to_zero:
+                for d in [1,2,0,3]:
+                    out1 += str(d) + ': ' + str(low[d])[:4] + ' '
+                out1 = out1[:-2]
+                out2 = ' high:'
+                for d in [1,2,0,3]:
+                    out2 += str(d) + ': ' + str(high[d])[:4] + ' '
+                out2 = out2[:-2]
+                out = (out1 + out2).ljust(linewidth)
+                '''
+                mean = np.mean(data, axis=0)
+                integral = integral + mean
+                '''
+                out = 'mean:'
+                #for d in dims_to_zero:
+                for d in [1,2,0,3]:
+                    out += str(d) + ': ' + str(mean[d])[:4] + ' '
+                '''
+                out = 'integral:'
+                #for d in dims_to_zero:
+                for d in [1,2,0,3]:
+                    out += str(d) + ': ' + str(integral[d])[:4] + ' '
+                out = out[:-2]
+                out = out.ljust(linewidth)
+
+                # end is carriage return so it doesn't fill the terminal
+                # with output
+                print(out, end='\r')
+
+                time.sleep(read_cycle)
+
+            # TODO sensor just stops. why?
+            print('resetting stepper')
+                
+
+
+    elif c == '4' or c == 's':
+        """
+        To check whether the ball is in axis. Use in combination with
+        Arduino script `vis_optic_flow.ino' and Python script
+        `ADNS3080ImageGrabber.py
+        """
+
         '''
         # ino build process has not been working
         upload = raw_input('Try uploading vis_optic_flow.ino to' + \
@@ -467,22 +586,23 @@ try:
             subprocess.Popen(['ino','')
         '''
 
-        duration = 120
+        cycle = 120
         velocity = 0.05 # revs / sec
 
         steps_per_sec = velocity * microsteps_per_rev
-        desiredNumMicrosteps = int(round(steps_per_sec * duration))
-
+        desiredNumMicrosteps = int(round(steps_per_sec * cycle))
         stepper.setVelocityLimit(stepper_id, \
             int(steps_per_sec))
-        stepper.setTargetPosition(stepper_id, desiredNumMicrosteps)
 
-        stepper.setEngaged(stepper_id, True)
-        sleep(duration)
+        print('Press Ctrl-C to exit')
 
-        sys.exit()
+        while True:
+            stepper.setCurrentPosition(stepper_id , 0)
+            stepper.setTargetPosition(stepper_id, desiredNumMicrosteps)
+            stepper.setEngaged(stepper_id, True)
+            sleep(cycle)
 
-    elif c == '4' or c == 'q':
+    elif c == '5' or c == 'q':
         print('Goodbye!')
         sys.exit()
 
@@ -492,11 +612,8 @@ try:
         the existing calibration predicts those values.
         """
 
-        if use_sensor:
-            port = '/dev/ttyACM1'
-            sensor = OpticFlowSensor(port)
-        else:
-            sensor = None
+        port = '/dev/ttyACM1'
+        sensor = OpticFlowSensor(port)
 
         coefficients = load_calibration()
 
@@ -513,22 +630,12 @@ try:
     if should_plot:
         plt.close('all')
         sns.set_style('dark')
-
-    if fixed_side == None:
-        side = raw_input('Where is the calibration stepper, from ' + \
-            'your perspective? [l]eft, [r]ight, [t]op\n').lower()
-    else:
-        side = fixed_side
-
-    if not (side == 'l' or side == 'r' or side == 't'):
-        print('Invalid side.')
-        sys.exit()
+   
+    # get where the stepper is from the user
+    side = get_side()
     
-    if use_sensor:
-        port = '/dev/ttyACM1'
-        sensor = OpticFlowSensor(port)
-    else:
-        sensor = None
+    port = '/dev/ttyACM1'
+    sensor = OpticFlowSensor(port)
 
     # is this enough to explore sensor behavior near ceiling of 
     # flies velocity?
@@ -562,125 +669,126 @@ try:
         data += new
         velocities += [[revs_per_sec] for x in new]
 
-    if use_sensor:
-        # data = [x for x in data if not np.isclose(x[0], 0.0)]
-        rotation_speeds = [x[0] for x in data]
-        sensor_dims = 4
+    # data = [x for x in data if not np.isclose(x[0], 0.0)]
+    rotation_speeds = [x[0] for x in data]
+    sensor_dims = 4
 
-        all_dim_data = []
-        # will be saved. used to recreate trajectories.
-        coefficients = []
-        # will be used to determine the dimension to save
-        variance = []
+    all_dim_data = []
+    # will be saved. used to recreate trajectories.
+    coefficients = []
+    # will be used to determine the dimension to save
+    variance = []
 
-        plt.figure()
+    plt.figure()
 
-        for d in range(sensor_dims):
-            print('For sensor dimension=' + str(d))
+    for d in range(sensor_dims):
+        print('For sensor dimension=' + str(d))
 
-            # M = # data points
-            # dim_data should be of shape (M,1)
-            # TODO check
-            dim_data = []
-            for x in data:
-                dim_data.append(x[d])
+        # M = # data points
+        # dim_data should be of shape (M,1)
+        # TODO check
+        dim_data = []
+        for x in data:
+            dim_data.append(x[d])
 
-            # TODO check velocities of shape (M,)
+        # TODO check velocities of shape (M,)
 
-            # save the nicely formatted data for use manual inspection later
-            all_dim_data.append(dim_data)
-            
-            plt.subplot(2,2,d+1)
-            # TODO wish alpha could be automatically chosen so as to
-            # only saturate at the maximum local density of points
-            plt.plot(dim_data, '.', alpha=0.01)
-            plt.title('Sensor dimension ' + str(d))
-            plt.ylabel('Sensor output along dimension '+str(d))
-            plt.xlabel('Datapoints from sensor')
-            plt.show()
+        # save the nicely formatted data for use manual inspection later
+        all_dim_data.append(dim_data)
         
-            # calculate the coefficient relating the ball velocity, 
-            # in revolutions per second, to output along the current
-            # sensor dimension
-            dim_array = np.array(dim_data).reshape((len(dim_data),1))
-
-            velocities = np.array(velocities)
-
-            X, residuals, rank, singular_values = \
-                np.linalg.lstsq(dim_array, velocities)
-
-            # TODO might try RANSAC, or something else less
-            # sensitive to outliers than least squares
-            # TODO always outputting same singular value?
-            # artifact of the numpy algorithm for values near 0?
-
-            # the coefficient relating this sensor dimension
-            # to ball velocity in revolutions per second
-            # (assumes X is a scalar)
-            coefficients.append(X)
-            variance.append(np.var(dim_array))
-
-            print('coefficient: ' + str(X))
-            print('residual: ' + str(residuals))
-            print('variance of sensor data along this dimension: ' + \
-                str(variance[-1]))
-
-            # TODO test and report on linearity (r^2?)
-
-            # TODO assert appropriate sensor values are around zero
-
+        plt.subplot(2,2,d+1)
+        # TODO wish alpha could be automatically chosen so as to
+        # only saturate at the maximum local density of points
+        plt.plot(dim_data, '.', alpha=0.01)
+        plt.title('Sensor dimension ' + str(d))
+        plt.ylabel('Sensor output along dimension '+str(d))
+        plt.xlabel('Datapoints from sensor')
         plt.show()
+    
+        # calculate the coefficient relating the ball velocity, 
+        # in revolutions per second, to output along the current
+        # sensor dimension
+        dim_array = np.array(dim_data).reshape((len(dim_data),1))
 
-        # these will all overwrite existing calibration files
-        # values other than l, r, or t, will have quit above already
-        if side == 'l':
-            # should cause one dimension of ipsilateral sensor
-            # to vary the most (dim 1 here)
-            left_y_dim = np.argmax(variance)
-            print(left_y_dim)
-            left_coeff = coefficients[left_y_dim]
-            with open('left_sensor_calibration.p', 'w') as f:
-                pickle.dump((left_y_dim, left_coeff), f)
+        velocities = np.array(velocities)
 
+        X, residuals, rank, singular_values = \
+            np.linalg.lstsq(dim_array, velocities)
+
+        # TODO might try RANSAC, or something else less
+        # sensitive to outliers than least squares
+        # TODO always outputting same singular value?
+        # artifact of the numpy algorithm for values near 0?
+
+        # the coefficient relating this sensor dimension
+        # to ball velocity in revolutions per second
+        # (assumes X is a scalar)
+        coefficients.append(X)
+        variance.append(np.var(dim_array))
+
+        print('coefficient: ' + str(X))
+        print('residual: ' + str(residuals))
+        print('variance of sensor data along this dimension: ' + \
+            str(variance[-1]))
+
+        # TODO test and report on linearity (r^2?)
+
+        # TODO assert appropriate sensor values are around zero
+
+    plt.show()
+
+    # these will all overwrite existing calibration files
+    # values other than l, r, or t, will have quit above already
+    if side == 'l':
+        # should cause one dimension of ipsilateral sensor
+        # to vary the most (dim 1 here)
+        left_y_dim = np.argmax(variance)
+        print(left_y_dim)
+        left_coeff = coefficients[left_y_dim]
+        with open('left_sensor_calibration.p', 'w') as f:
+            pickle.dump((left_y_dim, left_coeff), f)
+
+    elif side == 'r':
+        # should be dim 3 here
+        right_y_dim = np.argmax(variance)
+        right_coeff = coefficients[right_y_dim]
+
+        assert right_y_dim == 1,'unexpected dimension of most variance'
+
+        with open('right_sensor_calibration.p', 'w') as f:
+            pickle.dump((right_y_dim, right_coeff), f)
+        
+    elif side == 't':
+        # should vary one dim of each sensor equally (0,2)
+        yaw_dims = np.argsort(variance)[0:2]
+        print(yaw_dims)
+        yaw_coeffs = coefficients[yaw_dims]
+        with open('yaw_sensor_calibration.p', 'w') as f:
+            pickle.dump((yaw_dims, yaw_coeffs), f)
+
+    if not automatically_test:
+        guess = raw_input('Try to guess random rotational ' + \
+            'velocities? [y]es / [n]o.\n')
+    else:
+        print('AUTOMATICALLY TESTING CALIBRATION ALONG THIS DIMENSION')
+        print('To disable this, set automatically_test flag to false.')
+        guess = 'y'
+
+    # TODO add ability to just test existing calibration
+
+    # should be able to align on different axes before answering
+    # the above question, to test a wider array of cases
+
+    # can also switch test balls before starting tests
+    # (to check for texture dependence)
+    if guess.lower() == 'y':
+        if side == 't':
+            evaluate_calibration(stepper, sensor, yaw_coeffs, yaw_dims)
+        elif side == 'l':
+            evaluate_calibration(stepper,sensor,left_coeff, left_y_dim)
         elif side == 'r':
-            # should be dim 3 here
-            right_y_dim = np.argmax(variance)
-            right_coeff = coefficients[right_y_dim]
-            print(right_y_dim)
-            with open('right_sensor_calibration.p', 'w') as f:
-                pickle.dump((right_y_dim, right_coeff), f)
-            
-        elif side == 't':
-            # should vary one dim of each sensor equally (0,2)
-            yaw_dims = np.argsort(variance)[0:2]
-            print(yaw_dims)
-            yaw_coeffs = coefficients[yaw_dims]
-            with open('yaw_sensor_calibration.p', 'w') as f:
-                pickle.dump((yaw_dims, yaw_coeffs), f)
-
-        if not automatically_test:
-            guess = raw_input('Try to guess random rotational ' + \
-                'velocities? [y]es / [n]o.\n')
-        else:
-            print('AUTOMATICALLY TESTING CALIBRATION ALONG THIS DIMENSION')
-            print('To disable this, set automatically_test flag to false.')
-            guess = 'y'
-
-        # TODO add ability to just test existing calibration
-
-        # should be able to align on different axes before answering
-        # the above question, to test a wider array of cases
-
-        # can also switch test balls before starting tests
-        # (to check for texture dependence)
-        if guess.lower() == 'y':
-            if side == 't':
-                evaluate_calibration(stepper, sensor, yaw_coeffs, yaw_dims)
-            elif side == 'l':
-                evaluate_calibration(stepper,sensor,left_coeff, left_y_dim)
-            elif side == 'r':
-                evaluate_calibration(stepper,sensor,right_coeff,\
-                    right_y_dim)
+            evaluate_calibration(stepper,sensor,right_coeff,\
+                right_y_dim)
 
 except PhidgetException as e:
     print("Phidget Exception (in main) %i: %s" % (e.code, e.details))
@@ -692,12 +800,11 @@ finally:
     sleep(1)
     stepper.closePhidget()
     
-    if use_sensor:
-        try:    
-            sensor.close()
-            print('closed connection to sensor')
-        except:
-            pass
+    try:    
+        sensor.close()
+        print('closed connection to sensor')
+    except:
+        pass
 
     print('closed connection to stepper motor')
 
