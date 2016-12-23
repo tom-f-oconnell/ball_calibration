@@ -21,6 +21,7 @@ import serial
 # change sleep import above?
 import time
 
+from pykalman import KalmanFilter
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -32,12 +33,12 @@ automatically_test = True
 # for more verbose troubleshooting information
 __check__ = True
 # TODO remove
+'''
 fixed_mode = '3'
 fixed_side = 'l'
 '''
 fixed_mode = None
 fixed_side = None
-'''
 
 class OpticFlowSensor(serial.Serial):
 
@@ -92,7 +93,8 @@ class OpticFlowSensor(serial.Serial):
         return dataList
 
 def get_side():
-    """ Returns a char that indicates where the stepper is. """
+    ''' Asks the user where the stepper is.
+        Returns a char indicating which of 3 possibilities it is.'''
     
     # fixed_side is a global flag (above)
     if fixed_side == None:
@@ -124,7 +126,10 @@ def load_calibration():
 
 def test_velocity(stepper, sensor, velocity):
     '''
-    expecting velocity in revolutions per second.
+    Returns the sensor data, of shape (#datapoints x 4) collected
+    while the stepper is running at the input velocity.
+
+    Expecting velocity in units of revolutions per second.
     '''
     
     stepper_id = 0
@@ -161,6 +166,9 @@ def test_velocity(stepper, sensor, velocity):
     sleep(acceleration_period)
 
     # TODO mind (non-small) synchronization errors
+    # sensor has a set framerate (which arduino preserves?) but
+    # any missing frames will also cumulatively offset this
+
     # acquire optic flow data
     sensor.start()
 
@@ -293,7 +301,7 @@ def evaluate_calibration(stepper, sensor, coefficients, dims=None):
                 # TODO fix: RuntimeWarning: invalid value #
                 # encountered in multiply (for a v > 0, < 1)
                 plt.plot(np.arange(dim_data.size), \
-                    (v - coefficients[d] * dim_data).T, '.', alpha=0.03)
+                    (v - coefficients[d] * dim_data).T, '.', alpha=0.2)
 
 
                 plt.title('v=' + str(v)[:4] + ', d=' + str(dims[d]))
@@ -319,7 +327,7 @@ def evaluate_calibration(stepper, sensor, coefficients, dims=None):
 
             diffs.append(abs(mean_est - v))
             mean_estimates[d, count] = mean_est
-            all_dim_data.append(dim_data)
+            #all_dim_data.append(dim_data)
             data_dict[v] = all_dim_data
 
         count = count + 1
@@ -491,7 +499,7 @@ try:
         sensor = OpticFlowSensor(port)
 
         cycle = 120
-        velocity = 10.0 # revs / sec
+        velocity = 17.0 # revs / sec
 
         steps_per_sec = velocity * microsteps_per_rev
         desiredNumMicrosteps = int(round(steps_per_sec * cycle))
@@ -519,7 +527,7 @@ try:
             start = time.time()
 
             # TODO tell people which moves to make to align it
-            while time.time() < time.time() + cycle:
+            while time.time() < start + cycle:
                 # TODO maybe just have the sensor object clean the data
                 # and report on it?
                 new = sensor.readData()
@@ -545,8 +553,9 @@ try:
                 out = (out1 + out2).ljust(linewidth)
                 '''
                 mean = np.mean(data, axis=0)
+                # just meant to amplify error to a point where you can
+                # see it (individual measurements are noisy)
                 integral = integral + mean
-                '''
                 out = 'mean:'
                 #for d in dims_to_zero:
                 for d in [1,2,0,3]:
@@ -556,6 +565,7 @@ try:
                 #for d in dims_to_zero:
                 for d in [1,2,0,3]:
                     out += str(d) + ': ' + str(integral[d])[:4] + ' '
+                '''
                 out = out[:-2]
                 out = out.ljust(linewidth)
 
@@ -564,11 +574,6 @@ try:
                 print(out, end='\r')
 
                 time.sleep(read_cycle)
-
-            # TODO sensor just stops. why?
-            print('resetting stepper')
-                
-
 
     elif c == '4' or c == 's':
         """
@@ -673,13 +678,14 @@ try:
     rotation_speeds = [x[0] for x in data]
     sensor_dims = 4
 
-    all_dim_data = []
+    #all_dim_data = []
     # will be saved. used to recreate trajectories.
     coefficients = []
     # will be used to determine the dimension to save
     variance = []
 
-    plt.figure()
+    for i in range(3):
+        plt.figure(i+1)
 
     for d in range(sensor_dims):
         print('For sensor dimension=' + str(d))
@@ -694,16 +700,17 @@ try:
         # TODO check velocities of shape (M,)
 
         # save the nicely formatted data for use manual inspection later
-        all_dim_data.append(dim_data)
+        # all_dim_data.append(dim_data)
         
-        plt.subplot(2,2,d+1)
         # TODO wish alpha could be automatically chosen so as to
         # only saturate at the maximum local density of points
-        plt.plot(dim_data, '.', alpha=0.01)
-        plt.title('Sensor dimension ' + str(d))
-        plt.ylabel('Sensor output along dimension '+str(d))
-        plt.xlabel('Datapoints from sensor')
-        plt.show()
+        for i in range(3):
+            plt.figure(i+1)
+            plt.subplot(2,2,d+1)
+            plt.plot(dim_data, '.', alpha=0.1, label='raw')
+            plt.title('Sensor dimension ' + str(d))
+            plt.ylabel('Sensor output along dimension '+str(d))
+            plt.xlabel('Datapoints from sensor')
     
         # calculate the coefficient relating the ball velocity, 
         # in revolutions per second, to output along the current
@@ -711,6 +718,44 @@ try:
         dim_array = np.array(dim_data).reshape((len(dim_data),1))
 
         velocities = np.array(velocities)
+
+        # for predicting the velocity from noisy sensor
+        # data
+        # could try:
+        # -estimating variance of sensor dimensions prior
+        # -estimating rotation in one of component directions
+        #  from all four dimensions (unclear how to incorporate w/
+        #  calibrations from other angles then)
+        # -particle filter for non-Gaussian noise distribution?
+        # -test how Gaussian noise is (seems it is often just a lot of 
+        #  zeros, causing underestimates in linear ests.)
+        # -supervised EFK noise estimation in the style of Coates, Ng,et al
+        kf = KalmanFilter(n_dim_obs=1, n_dim_state=1)
+        print('fitting Kalman filter parameters w/ EM...', end="")
+        sys.stdout.flush()
+        kf1 = kf.em(dim_data)
+        print('1,',end="")
+        sys.stdout.flush()
+        kf2 = kf.em(dim_data, n_iter=10)
+        print('2,',end="")
+        sys.stdout.flush()
+        # we don't actually want to model transitions really
+        # nor process noise, which should be negligible compared
+        # to the observation noise
+        kf3 = kf.em(dim_data, em_vars='observation_covariance', n_iter=10)
+        print('3 done.')
+
+        # TODO run KF parameter estimation jointly on all data for
+        # each dimension (the EM step)
+        (filtered_mean1, filtered_variance1) = kf1.filter(dim_array)
+        (filtered_mean2, filtered_variance2) = kf2.filter(dim_array)
+        (filtered_mean3, filtered_variance3) = kf3.filter(dim_array)
+        plt.figure(1)
+        plt.plot(filtered_mean1, '.', alpha=0.2, label='1')
+        plt.figure(2)
+        plt.plot(filtered_mean2, '.', alpha=0.2, label='2')
+        plt.figure(3)
+        plt.plot(filtered_mean3, '.', alpha=0.2, label='3')
 
         X, residuals, rank, singular_values = \
             np.linalg.lstsq(dim_array, velocities)
@@ -735,6 +780,9 @@ try:
 
         # TODO assert appropriate sensor values are around zero
 
+    for i in range(3):
+        plt.figure(i+1)
+        plt.legend(loc='bottom right')
     plt.show()
 
     # these will all overwrite existing calibration files
@@ -743,10 +791,14 @@ try:
         # should cause one dimension of ipsilateral sensor
         # to vary the most (dim 1 here)
         left_y_dim = np.argmax(variance)
-        print(left_y_dim)
         left_coeff = coefficients[left_y_dim]
+
+        assert left_y_dim == 3,'unexpected dimension of most variance'
+
+        print('saving coefficients...', end='')
         with open('left_sensor_calibration.p', 'w') as f:
             pickle.dump((left_y_dim, left_coeff), f)
+        print(' done')
 
     elif side == 'r':
         # should be dim 3 here
@@ -755,16 +807,23 @@ try:
 
         assert right_y_dim == 1,'unexpected dimension of most variance'
 
+        print('saving coefficients...', end='')
         with open('right_sensor_calibration.p', 'w') as f:
             pickle.dump((right_y_dim, right_coeff), f)
+        print(' done')
         
     elif side == 't':
         # should vary one dim of each sensor equally (0,2)
         yaw_dims = np.argsort(variance)[0:2]
-        print(yaw_dims)
         yaw_coeffs = coefficients[yaw_dims]
+
+        assert 0 in yaw_dims,'unexpected dimension of highest variance'
+        assert 2 in yaw_dims,'unexpected dimension of highest variance'
+
+        print('saving coefficients...', end='')
         with open('yaw_sensor_calibration.p', 'w') as f:
             pickle.dump((yaw_dims, yaw_coeffs), f)
+        print(' done')
 
     if not automatically_test:
         guess = raw_input('Try to guess random rotational ' + \
