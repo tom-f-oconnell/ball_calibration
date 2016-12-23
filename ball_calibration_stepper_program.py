@@ -107,12 +107,15 @@ def test_velocity(stepper, sensor, velocity):
 
     stepper_id = 0
     microsteps_per_rev = 3200
-    rotation_time = 6 # sec (per increment)
-    acceleration_period = 5 # sec
+    rotation_time = 5 # sec (per increment)
+    acceleration_period = 4 # sec
     deceleration_period = 0 # sec
     # this is the amount of time we will record for
     steady_time = rotation_time - \
         (acceleration_period + deceleration_period)
+    # i think this could be avoided if you just figure out
+    # how to make acceleration of Phidget non-limiting
+    discard_fraction = 0.5
 
     print 'velocity=' + str(velocity) + ' revs/sec', 
     if velocity >= 0:
@@ -143,7 +146,7 @@ def test_velocity(stepper, sensor, velocity):
     # TODO any way to know arrival time of these? how did ROS add 
     # timestamp?
     sensor_data = []
-    min_so_far = 4
+    min_so_far = 20
     max_so_far = 0
 
     if __check__:
@@ -185,7 +188,7 @@ def test_velocity(stepper, sensor, velocity):
 
     sleep(deceleration_period)
 
-    return sensor_data
+    return sensor_data[int(round(len(sensor_data) * discard_fraction)):]
 
 # TODO docstring
 def evaluate_calibration(stepper, sensor, coefficients, dims=None):
