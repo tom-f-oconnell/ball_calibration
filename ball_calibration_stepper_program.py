@@ -26,6 +26,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pickle
+import os.path
 
 # global flags
 should_plot = True
@@ -34,11 +35,16 @@ automatically_test = True
 __check__ = True
 # TODO remove
 '''
-fixed_mode = '3'
+fixed_mode = '1'
 fixed_side = 'l'
 '''
 fixed_mode = None
 fixed_side = None
+
+# names for calibration files
+yfile = 'yaw_calibration.p'
+lfile = 'left_calibration.p'
+rfile = 'right_calibration.p'
 
 class OpticFlowSensor(serial.Serial):
 
@@ -49,7 +55,7 @@ class OpticFlowSensor(serial.Serial):
 
         time.sleep(1)
         """
-
+        # this block doesn't actually work
         start = time.time()
 
         while time.time() < start + 4.0:
@@ -110,19 +116,45 @@ def get_side():
     return side
     
 def load_calibration():
-    yaw_dims, yaw_coeffs = pickle.load(open('yaw_calibration.p','r'))
-    left_y_dim, left_coeff = pickle.load(open('left_calibration.p','r'))
-    right_y_dim, right_coeff = pickle.load(open('right_calibration.p','r'))
+    filters = dict()
+    coefficients = dict()
 
-    coefficients = np.empty((4,1)) * np.nan
-    coefficients[yaw_dims] = yaw_coeffs
-    coefficients[left_y_dim] = left_coeff
-    coefficients[right_y_dim] = right_coeff
+    if os.path.isfile(yfile):
+        yaw_dims, yaw_filters, yaw_coeffs = \
+            pickle.load(open(yfile,'r'))
 
-    assert not np.any(np.isnan(coefficients)), 'Not all dimensions ' + \
-        'covered in calibration.'
+        # will generally be redundant with check before saving
+        # and a pretty weak gaurantee anyway...
+        assert yaw_dims == (0,2)
+        filters.update(yaw_filters)
+        coefficients.update(yaw_coeffs)
+    else:
+        print('Missing ' + yfile + '.')
 
-    return coefficients
+    if os.path.isfile(lfile):
+        left_y_dim, left_filter, left_coeff = \
+            pickle.load(open(lfile,'r'))
+
+        assert left_y_dim == 3
+        filters.update(left_filter)
+        coefficients.update(left_coeff)
+    else:
+        print('Missing ' + lfile + '.')
+
+    if os.path.isfile(rfile):
+        right_y_dim, right_filter, right_coeff = \
+            pickle.load(open(rfile,'r'))
+
+        assert right_y_dim == 1
+        filters.update(right_filter)
+        coefficients.update(right_coeff)
+    else:
+        print('Missing ' + rfile + '.')
+
+    if len(coefficients.keys()) < 3 or len(filters.keys()) < 3:
+        print('WARNING: incomplete calibration.')
+
+    return filters, coefficients
 
 def test_velocity(stepper, sensor, velocity):
     '''
@@ -158,7 +190,7 @@ def test_velocity(stepper, sensor, velocity):
     # selects only the positive component (magnitude)
     stepper.setVelocityLimit(stepper_id, \
         np.sign(steps_per_sec) * steps_per_sec)
-
+    stepper.setEngaged(stepper_id, True)
     stepper.setCurrentPosition(stepper_id, 0)
     stepper.setTargetPosition(stepper_id, int(desiredNumMicrosteps))
     
@@ -213,17 +245,26 @@ def test_velocity(stepper, sensor, velocity):
 
     return sensor_data[int(round(len(sensor_data) * discard_fraction)):]
 
-# TODO docstring
-def evaluate_calibration(stepper, sensor, coefficients, dims=None):
-    guesses = 5
+def evaluate_calibration(stepper, sensor, filters, coefficients,guesses=5):
+    ''' Uses a pseudorandom (seeded) sequence of velocities to test the
+        predictive power of a calibration, defined by two dictionaries:
+            -one taking sensor dimensions to a Kalman filter with an
+             observation noise model fit to that sensor dimension
+            -another taking sensor dimensions to a scaling factor
+             that relates the filters estimate of the mean sensor state
+             to the ball velocity about the cognate axis
+
+        Note: test velocities are bounded to 
+        [-max_revs_per_sec, max_revs_per_sec], so may not test values
+        outside of the range used for calibration.
+    '''
     
-    if dims == None:
-        num_dims = 4
-        dims = [0, 1, 2, 3]
-    else:
-        num_dims = dims.size
-        if dims.size == 1:
-            dims = [dims]
+    # filters and coefficients should already have been checked
+    # so that their keys are gauranteed to match exactly.
+    # can include combinations of dimensions, so they are used jointly
+    # in the filtering step.
+    dims = filters.keys()
+    num_dims = len(dims)
 
     # same as above
     # corresponds to about 50 cm / sec
@@ -246,8 +287,6 @@ def evaluate_calibration(stepper, sensor, coefficients, dims=None):
     plt.suptitle('Error in velocity estimated independently ' +\
         'with each dimension')
 
-    count = 0
-
     # to make differences comparable across runs
     np.random.seed(1)
     rand_velocities = np.random.uniform(low=-max_revs_per_sec, \
@@ -264,47 +303,30 @@ def evaluate_calibration(stepper, sensor, coefficients, dims=None):
 
     diffs = []
 
-    for v in rand_velocities:
+    for j, v in enumerate(rand_velocities):
 
-        data = test_velocity(stepper, sensor, v)
-
-        '''
-        because the bottom of the ball is occluded
-        sensors that would otherwise be seeing a net zero
-        optic flow will output some nonzero optic flow
-        TODO how to calculate velocities such that they
-        generalize as best as possible? (to rotation along
-        non principal axes)
-        '''
-
-        # join all top-level lists within one period
-        # of data collection (one rotational velocity)
-        #joined = [j for i in trial_data for j in i]
+        # TODO check this is correctly formed, and not of type 'object'
+        data = np.array(test_velocity(stepper, sensor, v))
+        print(data.shape)
+        print(data.dtype)
 
         # for inspection
         all_dim_data = []
 
         # make one plot for each sensor dimension
-        for d in range(num_dims):
-            dim_data = []
-
-            for x in data:
-                dim_data.append(x[dims[d]])
-
-            dim_data = np.array(dim_data)
-
-            # could try smoothing before scaling
+        for i, ds in enumerate(dims):
+            dim_data = data[:, ds]
 
             if should_plot:
-                plt.subplot(guesses, num_dims, num_dims*count + d + 1)
+                plt.subplot(guesses, num_dims, num_dims*j + i + 1)
                 # plotting the error
                 # TODO fix: RuntimeWarning: invalid value #
                 # encountered in multiply (for a v > 0, < 1)
-                plt.plot(np.arange(dim_data.size), \
-                    (v - coefficients[d] * dim_data).T, '.', alpha=0.2)
+                # TODO maybe dont need the transpose?
+                plt.plot(np.arange(dim_data.shape[0]), \
+                    (v - coefficients[ds] * dim_data).T, '.', alpha=0.2)
 
-
-                plt.title('v=' + str(v)[:4] + ', d=' + str(dims[d]))
+                plt.title('v=' + str(v)[:4] + ', d=' + str(ds))
                 # put in a fig note saying d is dimension used to
                 # estimate v
 
@@ -313,7 +335,7 @@ def evaluate_calibration(stepper, sensor, coefficients, dims=None):
                 frame.axes.get_xaxis().set_ticks([])
                 #frame.axes.get_yaxis().set_ticks([])
 
-            mean_est = coefficients[d] * np.mean(dim_data)
+            mean_est = coefficients[ds] * np.mean(dim_data)
             print('actual velocity : '+ str(v))
             print('mean estimate : ' + \
                 str(mean_est))
@@ -321,17 +343,14 @@ def evaluate_calibration(stepper, sensor, coefficients, dims=None):
             # TODO median in a sliding window? (could conceivably 
             # actually be used to estimate)
             print('median estimate : ' + \
-                str(np.median(coefficients[d] * dim_data)))
+                str(np.median(coefficients[ds] * dim_data)))
 
             print('')
 
             diffs.append(abs(mean_est - v))
-            mean_estimates[d, count] = mean_est
+            mean_estimates[i, j] = mean_est
             #all_dim_data.append(dim_data)
             data_dict[v] = all_dim_data
-
-        count = count + 1
-
         
     if should_plot:
         plt.figure()
@@ -620,9 +639,10 @@ try:
         port = '/dev/ttyACM1'
         sensor = OpticFlowSensor(port)
 
-        coefficients = load_calibration()
+        filters, coefficients = load_calibration()
 
-        evaluate_calibration(stepper, sensor, coefficients)
+        evaluate_calibration(stepper, sensor, filters, coefficients)
+
         # TODO or return to menu?
         sys.exit()
 
@@ -645,13 +665,9 @@ try:
     # is this enough to explore sensor behavior near ceiling of 
     # flies velocity?
     # was previously capped by Pavan at 4 revs / sec
-    stepper.setVelocityLimit(stepper_id, int(16 * microsteps_per_rev))
-    
-    stepper.setEngaged(stepper_id, True)
-    sleep(1)
-    
+    #stepper.setVelocityLimit(stepper_id, int(16 * microsteps_per_rev))
     # defined purely by above...
-    max_revs_per_sec = stepper.getVelocityLimit(0) / microsteps_per_rev
+    max_revs_per_sec = 16.0 / microsteps_per_rev
 
     velocity_increments = 5
     data = []
@@ -674,50 +690,61 @@ try:
         data += new
         velocities += [[revs_per_sec] for x in new]
 
-    # data = [x for x in data if not np.isclose(x[0], 0.0)]
+    data = np.array(data)
+
     rotation_speeds = [x[0] for x in data]
-    sensor_dims = 4
+    sensor_dims = ((0,2),1,3)
 
     #all_dim_data = []
-    # will be saved. used to recreate trajectories.
-    coefficients = []
     # will be used to determine the dimension to save
     variance = []
 
-    for i in range(3):
-        plt.figure(i+1)
+    # filters and coefficients will be saved. 
+    # used to recreate trajectories, and for closed loop
+    if side == 'l':
+        expected_dims = 3
+    elif side == 'r':
+        expected_dims = 1
+    elif side == 't':
+        expected_dims = (0,2)
+    filters = dict()
+    coefficients = dict()
 
-    for d in range(sensor_dims):
-        print('For sensor dimension=' + str(d))
+    plt.figure()
+
+    for i, ds in enumerate(sensor_dims):
+        print('For sensor dimension(s)=' + str(ds))
 
         # M = # data points
-        # dim_data should be of shape (M,1)
-        # TODO check
-        dim_data = []
-        for x in data:
-            dim_data.append(x[d])
+        # dim_data should be of shape (M,#dims)
+        if type(ds) == tuple:
+            dim_data = data[:,ds].reshape((data.shape[0],len(ds)))
+        elif type(ds) == int:
+            dim_data = data[:,ds].reshape((data.shape[0],1))
+        else:
+            # lists can't be used as keys in dicts
+            # numpy arrays probably cant either
+            # (both are mutable)
+            raise TypeError("dimension type not supported: " + \
+                str(type(ds)))
 
-        # TODO check velocities of shape (M,)
+        # should be of shape (M,)
+        velocities = np.array(velocities)
 
         # save the nicely formatted data for use manual inspection later
         # all_dim_data.append(dim_data)
         
         # TODO wish alpha could be automatically chosen so as to
         # only saturate at the maximum local density of points
-        for i in range(3):
-            plt.figure(i+1)
-            plt.subplot(2,2,d+1)
-            plt.plot(dim_data, '.', alpha=0.1, label='raw')
-            plt.title('Sensor dimension ' + str(d))
-            plt.ylabel('Sensor output along dimension '+str(d))
-            plt.xlabel('Datapoints from sensor')
+        plt.subplot(2,2,i+1)
+        # should plot two lines for yaw dimensions
+        plt.plot(dim_data, '.', alpha=0.1, label='raw')
+        plt.title('Sensor dimension(s) ' + str(ds))
+        plt.ylabel('Sensor output along dimension(s) '+str(ds))
+        plt.xlabel('Datapoints from sensor')
     
-        # calculate the coefficient relating the ball velocity, 
-        # in revolutions per second, to output along the current
-        # sensor dimension
-        dim_array = np.array(dim_data).reshape((len(dim_data),1))
-
-        velocities = np.array(velocities)
+        # calculate the coefficient relating the filtered sensor
+        # output to ball rotation about this calibration axis
 
         # for predicting the velocity from noisy sensor
         # data
@@ -730,59 +757,60 @@ try:
         # -test how Gaussian noise is (seems it is often just a lot of 
         #  zeros, causing underestimates in linear ests.)
         # -supervised EFK noise estimation in the style of Coates, Ng,et al
-        kf = KalmanFilter(n_dim_obs=1, n_dim_state=1)
-        print('fitting Kalman filter parameters w/ EM...', end="")
-        sys.stdout.flush()
-        kf1 = kf.em(dim_data)
-        print('1,',end="")
-        sys.stdout.flush()
-        kf2 = kf.em(dim_data, n_iter=10)
-        print('2,',end="")
-        sys.stdout.flush()
-        # we don't actually want to model transitions really
-        # nor process noise, which should be negligible compared
-        # to the observation noise
-        kf3 = kf.em(dim_data, em_vars='observation_covariance', n_iter=10)
-        print('3 done.')
+        if ds == expected_dims:
 
-        # TODO run KF parameter estimation jointly on all data for
-        # each dimension (the EM step)
-        (filtered_mean1, filtered_variance1) = kf1.filter(dim_array)
-        (filtered_mean2, filtered_variance2) = kf2.filter(dim_array)
-        (filtered_mean3, filtered_variance3) = kf3.filter(dim_array)
-        plt.figure(1)
-        plt.plot(filtered_mean1, '.', alpha=0.2, label='1')
-        plt.figure(2)
-        plt.plot(filtered_mean2, '.', alpha=0.2, label='2')
-        plt.figure(3)
-        plt.plot(filtered_mean3, '.', alpha=0.2, label='3')
+            if type(ds) == tuple:
+                kf = KalmanFilter(n_dim_obs=len(ds), n_dim_state=1)
+            elif type(ds) == int:
+                kf = KalmanFilter(n_dim_obs=1, n_dim_state=1)
 
+            print('fitting Kalman filter parameters w/ EM...', end="")
+            sys.stdout.flush()
+            # we don't actually want to model transitions really
+            # nor process noise, which should be negligible compared
+            # to the observation noise
+            kf = kf.em(dim_data,em_vars='observation_covariance',n_iter=10)
+            print(' done.')
+
+            # so we can save the fit filters
+            filters[ds] = kf
+
+            (filtered_mean, filtered_variance) = kf.filter(dim_data)
+            plt.plot(filtered_mean, '.', alpha=0.2, label='filtered')
+
+            # not sure how to make Kalman fitting supervised
+            # if i could do that, i wouldn't need to filter ->
+            # linear regression
+            X, residuals, rank, singular_values = \
+                np.linalg.lstsq(filtered_mean, velocities)
+
+            # TODO test and report on linearity (r^2?)
+
+            # the coefficient relating this (filtered) sensor dimension
+            # to ball velocity in revolutions per second
+            coefficients[ds] = X
+
+        # TODO remove
         X, residuals, rank, singular_values = \
-            np.linalg.lstsq(dim_array, velocities)
+            np.linalg.lstsq(dim_data, velocities)
 
         # TODO might try RANSAC, or something else less
         # sensitive to outliers than least squares
         # TODO always outputting same singular value?
         # artifact of the numpy algorithm for values near 0?
 
-        # the coefficient relating this sensor dimension
-        # to ball velocity in revolutions per second
-        # (assumes X is a scalar)
-        coefficients.append(X)
-        variance.append(np.var(dim_array))
+        # will be largest for sensor dimension sensitive to velocity
+        # about current axis, because the ball is actually moving
+        # over a wide range of velocities
+        # TODO make sure multiple dimensions handled sensibly
+        variance.append(np.var(dim_data))
 
         print('coefficient: ' + str(X))
         print('residual: ' + str(residuals))
         print('variance of sensor data along this dimension: ' + \
             str(variance[-1]))
 
-        # TODO test and report on linearity (r^2?)
-
-        # TODO assert appropriate sensor values are around zero
-
-    for i in range(3):
-        plt.figure(i+1)
-        plt.legend(loc='bottom right')
+    plt.legend(loc='bottom right')
     plt.show()
 
     # these will all overwrite existing calibration files
@@ -790,39 +818,58 @@ try:
     if side == 'l':
         # should cause one dimension of ipsilateral sensor
         # to vary the most (dim 1 here)
-        left_y_dim = np.argmax(variance)
-        left_coeff = coefficients[left_y_dim]
+        left_y_dim = sensor_dims[np.argmax(variance)]
+        left_filter = filters
+        left_coeff = coefficients
 
-        assert left_y_dim == 3,'unexpected dimension of most variance'
+        assert left_y_dim == 3, \
+            'unexpected dimension of most variance: ' + str(left_y_dim)
+        assert set(filters.keys()) == set([left_y_dim]), \
+            'unexpected filter dims'
+        assert set(coefficients.keys()) == set([left_y_dim]), \
+            'unexpected coefficient dimensions'
 
-        print('saving coefficients...', end='')
-        with open('left_sensor_calibration.p', 'w') as f:
-            pickle.dump((left_y_dim, left_coeff), f)
+        print('saving filter and coefficient...', end='')
+        with open(lfile, 'w') as f:
+            pickle.dump((left_y_dim, left_filter, left_coeff), f)
         print(' done')
 
     elif side == 'r':
         # should be dim 3 here
-        right_y_dim = np.argmax(variance)
-        right_coeff = coefficients[right_y_dim]
+        right_y_dim = sensor_dims[np.argmax(variance)]
+        right_filter = filters
+        right_coeff = coefficients
 
-        assert right_y_dim == 1,'unexpected dimension of most variance'
+        assert right_y_dim == 1, \
+            'unexpected dimension of most variance: ' + str(right_y_dim)
+        assert set(filters.keys()) == right_y_dim, 'unexpected filter dims'
+        assert set(coefficients.keys()) == right_y_dim, \
+            'unexpected coefficient dimensions'
 
-        print('saving coefficients...', end='')
-        with open('right_sensor_calibration.p', 'w') as f:
-            pickle.dump((right_y_dim, right_coeff), f)
+        print('saving filter and coefficient...', end='')
+        with open(rfile, 'w') as f:
+            pickle.dump((right_y_dim, right_filter, right_coeff), f)
         print(' done')
         
     elif side == 't':
-        # should vary one dim of each sensor equally (0,2)
-        yaw_dims = np.argsort(variance)[0:2]
-        yaw_coeffs = coefficients[yaw_dims]
+        # should vary one dim of each sensor about equally (0,2)
+
+        # TODO don't really like that this doesnt look at dims (0,2)
+        # independently now...
+        yaw_dims = sensor_dims[np.argmax(variance)]
+        yaw_filters = filters
+        yaw_coeffs = coefficients
+        #yaw_coeffs = coefficients[yaw_dims]
 
         assert 0 in yaw_dims,'unexpected dimension of highest variance'
         assert 2 in yaw_dims,'unexpected dimension of highest variance'
+        assert set(filters.keys()) == yaw_dims, 'unexpected filter dims'
+        assert set(coefficients.keys()) == yaw_dims, \
+            'unexpected coefficient dimensions'
 
-        print('saving coefficients...', end='')
-        with open('yaw_sensor_calibration.p', 'w') as f:
-            pickle.dump((yaw_dims, yaw_coeffs), f)
+        print('saving filter and coefficient...', end='')
+        with open(yfile, 'w') as f:
+            pickle.dump((yaw_dims, yaw_filters, yaw_coefficients), f)
         print(' done')
 
     if not automatically_test:
@@ -841,13 +888,7 @@ try:
     # can also switch test balls before starting tests
     # (to check for texture dependence)
     if guess.lower() == 'y':
-        if side == 't':
-            evaluate_calibration(stepper, sensor, yaw_coeffs, yaw_dims)
-        elif side == 'l':
-            evaluate_calibration(stepper,sensor,left_coeff, left_y_dim)
-        elif side == 'r':
-            evaluate_calibration(stepper,sensor,right_coeff,\
-                right_y_dim)
+        evaluate_calibration(stepper, sensor, filters, coefficients)
 
 except PhidgetException as e:
     print("Phidget Exception (in main) %i: %s" % (e.code, e.details))
@@ -855,8 +896,8 @@ except PhidgetException as e:
 # close serial stuff no matter how we exit
 # with(...) syntax probably the best, but more involved
 finally:
-    stepper.setEngaged(0, False)
-    sleep(1)
+    stepper.setEngaged(stepper_id, False)
+    sleep(0.15)
     stepper.closePhidget()
     
     try:    
