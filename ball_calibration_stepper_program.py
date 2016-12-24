@@ -190,9 +190,9 @@ def test_velocity(stepper, sensor, velocity):
     # selects only the positive component (magnitude)
     stepper.setVelocityLimit(stepper_id, \
         np.sign(steps_per_sec) * steps_per_sec)
-    stepper.setEngaged(stepper_id, True)
     stepper.setCurrentPosition(stepper_id, 0)
     stepper.setTargetPosition(stepper_id, int(desiredNumMicrosteps))
+    stepper.setEngaged(stepper_id, True)
     
     # wait for it to get up to speed
     sleep(acceleration_period)
@@ -665,9 +665,7 @@ try:
     # is this enough to explore sensor behavior near ceiling of 
     # flies velocity?
     # was previously capped by Pavan at 4 revs / sec
-    #stepper.setVelocityLimit(stepper_id, int(16 * microsteps_per_rev))
-    # defined purely by above...
-    max_revs_per_sec = 16.0 / microsteps_per_rev
+    max_revs_per_sec = 16.0
 
     velocity_increments = 5
     data = []
